@@ -1,0 +1,126 @@
+import requests
+import pandas as pd
+import time
+
+
+states_coords = {
+"MB8": (49.1810, -97.9393)
+}
+
+# -----------------------------------
+# 2. Global settings
+# -----------------------------------
+START = "1995-01-01"
+END = "2024-12-31"
+TIMEZONE = "America%2FEdmonton"
+
+DAILY_VARS = (
+    "temperature_2m_mean,"
+    "temperature_2m_max,"
+    "temperature_2m_min,"
+    "precipitation_sum,"
+    "vapour_pressure_deficit_max,"
+    "soil_moisture_0_to_7cm_mean,"
+    "relative_humidity_2m_mean,"
+    "dew_point_2m_mean,"
+    "soil_temperature_0_to_7cm_mean,"
+    "wind_gusts_10m_mean,"
+    "wind_speed_10m_mean"
+)
+
+
+def fetch_state_monthly(region_code, lat, lon,
+                        max_retries=5, pause_seconds=70):
+    """Fetch daily climate + soil data for 1995–2024 for one AB region."""
+    url = (
+        "https://archive-api.open-meteo.com/v1/archive?"
+        f"latitude={lat}&longitude={lon}"
+        f"&start_date={START}&end_date={END}"
+        f"&daily={DAILY_VARS}"
+        f"&timezone={TIMEZONE}"
+    )
+
+    data = None
+    for attempt in range(max_retries):
+        r = requests.get(url)
+
+        if r.status_code == 200:
+            data = r.json()
+        elif r.status_code == 429:
+            print(f"[{region_code}] 429 rate limit. Waiting {pause_seconds}s…")
+            time.sleep(pause_seconds)
+            continue
+        else:
+            r.raise_for_status()
+
+        if "daily" in data:
+            break
+
+        if data.get("error"):
+            reason = data.get("reason", "")
+            if "limit" in reason.lower():
+                print(f"[{region_code}] Rate limit. Waiting {pause_seconds}s…")
+                time.sleep(pause_seconds)
+                continue
+            else:
+                raise ValueError(f"API error {region_code}: {data}")
+
+    else:
+        raise ValueError(f"Failed to get daily data for {region_code}")
+
+    # Build daily dataframe
+    df = pd.DataFrame(data["daily"])
+    df = df.rename(columns={"time": "Date"})
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["Year"] = df["Date"].dt.year
+    df["Month"] = df["Date"].dt.month
+
+    value_cols = [
+        "temperature_2m_mean",
+        "temperature_2m_max",
+        "temperature_2m_min",
+        "precipitation_sum",
+        "vapour_pressure_deficit_max",
+        "soil_moisture_0_to_7cm_mean",
+        "relative_humidity_2m_mean"
+    ]
+
+    # Monthly averages
+    monthly = (
+        df.groupby(["Year", "Month"])[value_cols]
+          .mean()
+          .reset_index()
+    )
+
+    # Insert AB1–AB7
+    monthly.insert(0, "Region", region_code)
+
+    return monthly
+
+
+# -----------------------------------
+# 3. Loop over 7 regions
+# -----------------------------------
+all_regions_monthly = []
+
+for region_code, (lat, lon) in states_coords.items():
+    print(f"Fetching region {region_code}…")
+    monthly_df = fetch_state_monthly(region_code, lat, lon)
+    all_regions_monthly.append(monthly_df)
+    time.sleep(3)  # safety pause
+
+
+# -----------------------------------
+# 4. Combine & Save
+# -----------------------------------
+combined = pd.concat(all_regions_monthly, ignore_index=True)
+combined = combined.sort_values(["Region", "Year", "Month"])
+
+output_file = "CANRegions_ClimateSoil_Monthly_1995_2024.csv"
+combined.to_csv(output_file, index=False)
+
+print("Saved:", output_file)
+print(combined.head())
+
+from google.colab import files
+files.download(output_file)
